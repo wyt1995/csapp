@@ -407,14 +407,14 @@ void sigchld_handler(int sig) {
             printf("Job [%d] (%d) stopped by signal %d\n", job->jid, job->pid, WSTOPSIG(status));
             Sigprocmask(SIG_BLOCK, &mask, &prev_mask);
             job->state = ST;
-            Sigprocmask(SIG_UNBLOCK, &prev_mask, NULL);
+            Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
         }
 
         // if the child was continued from a stop state, change the job's state to background
         else if (WIFCONTINUED(status)) {
             Sigprocmask(SIG_BLOCK, &mask, &prev_mask);
             job->state = BG;
-            Sigprocmask(SIG_UNBLOCK, &prev_mask, NULL);
+            Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
         }
     }
 
