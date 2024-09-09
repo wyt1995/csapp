@@ -341,13 +341,18 @@ void do_bgfg(char **argv) {
     }
     pid = job->pid;
 
+    sigset_t mask, prev_mask;
+    Sigfillset(&mask);
+    Sigprocmask(SIG_BLOCK, &mask, &prev_mask);
     if (argv[0][0] == 'b') {
         Kill(-pid, SIGCONT);
         job->state = BG;
         printf("[%d] (%d) %s", job->jid, job->pid, job->cmdline);
+        Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
     } else if (argv[0][0] == 'f') {
         Kill(-pid, SIGCONT);
         job->state = FG;
+        Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
         waitfg(pid);
     }
 }
@@ -356,11 +361,14 @@ void do_bgfg(char **argv) {
  * waitfg - Block until process pid is no longer the foreground process
  */
 void waitfg(pid_t pid) {
-    sigset_t mask;
+    sigset_t mask, prev_mask;
     sigemptyset(&mask);
+    sigaddset(&mask, SIGCHLD);
+    Sigprocmask(SIG_BLOCK, &mask, &prev_mask);
     while (pid == fgpid(jobs)) {
-        sigsuspend(&mask);
+        sigsuspend(&prev_mask);
     }
+    Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
 }
 
 /*****************
