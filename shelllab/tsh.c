@@ -317,6 +317,7 @@ void do_bgfg(char **argv) {
     // find job struct based on argv
     if (!argv[1]) {
         printf("%s command requires PID or %%jobid argument\n", argv[0]);
+        return;
     }
 
     if (argv[1][0] == '%') {
