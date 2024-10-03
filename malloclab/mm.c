@@ -34,6 +34,7 @@
 #define BLOCK_SIZE(p) (GET(p) & ~0x7)
 #define CURR_ALLOC(p) (GET(p) & 0x1)   // last bit
 #define PREV_ALLOC(p) (GET(p) & 0x2)   // second-last bit
+#define ALLOC_BITS(p) (GET(p) & 0x3)   // last two bits
 
 // set allocated bits
 #define SET_CURR_ALLOC(p) (GET(p) |= 0x1)
@@ -142,7 +143,51 @@ void mm_free(void *ptr) {
  * and returns the address of the new block.
  */
 void *mm_realloc(void *ptr, size_t size) {
-    return NULL;
+    if (ptr == NULL) {
+        return mm_malloc(size);
+    }
+    if (size == 0) {
+        mm_free(ptr);
+        return NULL;
+    }
+
+    size_t old_size = BLOCK_SIZE(HEADER(ptr));
+    size_t new_size;
+    if (size <= DOUBLE_SIZE) {
+        new_size = 2 * DOUBLE_SIZE;
+    } else {
+        new_size = ALIGN(size + WORD_SIZE);
+    }
+
+    if (new_size <= old_size) {
+        if (old_size - new_size >= 2 * DOUBLE_SIZE) {
+            SET_PREV_FREE(HEADER(NEXT_BLOCK(ptr)));
+            PUT(HEADER(ptr), PACK(new_size, ALLOC_BITS(HEADER(ptr))));
+            PUT(HEADER(NEXT_BLOCK(ptr)), PACK(old_size - new_size, 2));
+            PUT(FOOTER(NEXT_BLOCK(ptr)), PACK(old_size - new_size, 2));
+        }
+        return ptr;
+    }
+
+    void *new_ptr;
+    size_t allowed_size = old_size;
+    if (CURR_ALLOC(HEADER(NEXT_BLOCK(ptr))) == 0) {
+        allowed_size += BLOCK_SIZE(HEADER(NEXT_BLOCK(ptr)));
+    }
+    if (new_size <= allowed_size) {
+        PUT(HEADER(ptr), PACK(new_size, ALLOC_BITS(HEADER(ptr))));
+        new_ptr = ptr;
+        ptr = NEXT_BLOCK(ptr);
+        PUT(HEADER(ptr), PACK(allowed_size - new_size, 2));
+        PUT(FOOTER(ptr), PACK(allowed_size - new_size, 2));
+    } else {
+        new_ptr = mm_malloc(size);
+        if (!new_ptr)
+            return NULL;
+        memcpy(new_ptr, ptr, old_size);
+        mm_free(ptr);
+    }
+    return new_ptr;
 }
 
 
