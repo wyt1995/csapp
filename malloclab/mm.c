@@ -323,12 +323,23 @@ static void place(void *ptr, size_t align_size) {
 
 static inline void insert_node(void *bp, size_t size) {
     int n = find_group(size);
-    void *next = free_lists[n];
-    free_lists[n] = bp;
-    SET_PREV_NODE(bp, 0);
-    SET_NEXT_NODE(bp, next);
-    if (next) {
-        SET_PREV_NODE(next, bp);
+    void *prev = 0;
+    void *current = free_lists[n];
+
+    while (current != 0 && current < bp) {
+        prev = current;
+        current = NEXT_NODE(current);
+    }
+    SET_PREV_NODE(bp, prev);
+    SET_NEXT_NODE(bp, current);
+
+    if (prev == 0) {
+        free_lists[n] = bp;
+    } else {
+        SET_NEXT_NODE(prev, bp);
+    }
+    if (current) {
+        SET_PREV_NODE(current, bp);
     }
 }
 
