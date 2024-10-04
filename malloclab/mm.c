@@ -9,7 +9,8 @@
 
 
 /* single word (4) or double word (8) alignment */
-#define ALIGNMENT 8
+#define SIZE_T_SIZE (sizeof(size_t))
+#define ALIGNMENT (2 * SIZE_T_SIZE)
 
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~0x7)
@@ -53,14 +54,25 @@
 #define NEXT_BLOCK(bp) (BLOCK_PTR(bp) + BLOCK_SIZE(HEADER(bp)))
 #define PREV_BLOCK(bp) (BLOCK_PTR(bp) - BLOCK_SIZE((BLOCK_PTR(bp) - DOUBLE_SIZE)))
 
+// doubly linked list
+#define PREV_NODE(bp)  ((void *) (*(size_t *) ((char *)(bp))))
+#define NEXT_NODE(bp)  ((void *) (*(size_t *) ((char *)(bp) + SIZE_T_SIZE)))
+#define SET_PREV_NODE(bp, val)   (*(size_t *) ((char *)(bp)) = (size_t)(val))
+#define SET_NEXT_NODE(bp, val)   (*(size_t *) ((char *)(bp) + SIZE_T_SIZE) = (size_t)(val))
+
 // global variable, always points to the prologue block
 static char* heap_list = 0;
 
+// segregated free lists
+static void* free_lists[BUCKET_NUM];
+
 // function prototypes
-static inline void *extend_heap(size_t bytes);
+static void *extend_heap(size_t bytes);
 static void *coalesce(void *bp);
 static void *find_fit(size_t align_size);
 static void place(void *ptr, size_t align_size);
+static inline void insert_node(void *bp, size_t size);
+static inline void remove_node(void *bp);
 
 // heap checker for debugging
 static void check_heap();
@@ -71,6 +83,14 @@ static void check_freelist();
  * @return 0 if okay, -1 if there was a problem in performing the initialization.
  */
 int mm_init(void) {
+    // initialize segregated free lists
+    if ((heap_list = mem_sbrk(BUCKET_NUM * SIZE_T_SIZE)) == (void *) -1) {
+        return -1;
+    }
+    for (int i = 0; i < BUCKET_NUM; i++) {
+        free_lists[i] = 0;
+    }
+
     // create initial heap with empty free list
     if ((heap_list = mem_sbrk(4 * WORD_SIZE)) == (void *) -1) {
         return -1;
@@ -102,8 +122,8 @@ void *mm_malloc(size_t size) {
     // adjust size to include overhead, round up to be multiples of 8 bytes
     char *bp;
     size_t align_size;
-    if (size <= DOUBLE_SIZE) {
-        align_size = 2 * DOUBLE_SIZE;
+    if (size <= ALIGNMENT) {
+        align_size = 2 * ALIGNMENT;
     } else {
         align_size = ALIGN(size + WORD_SIZE);
     }
@@ -153,18 +173,19 @@ void *mm_realloc(void *ptr, size_t size) {
 
     size_t old_size = BLOCK_SIZE(HEADER(ptr));
     size_t new_size;
-    if (size <= DOUBLE_SIZE) {
-        new_size = 2 * DOUBLE_SIZE;
+    if (size <= ALIGNMENT) {
+        new_size = 2 * ALIGNMENT;
     } else {
         new_size = ALIGN(size + WORD_SIZE);
     }
 
     if (new_size <= old_size) {
-        if (old_size - new_size >= 2 * DOUBLE_SIZE) {
+        if (old_size - new_size >= 2 * ALIGNMENT) {
             SET_PREV_FREE(HEADER(NEXT_BLOCK(ptr)));
             PUT(HEADER(ptr), PACK(new_size, ALLOC_BITS(HEADER(ptr))));
             PUT(HEADER(NEXT_BLOCK(ptr)), PACK(old_size - new_size, 2));
             PUT(FOOTER(NEXT_BLOCK(ptr)), PACK(old_size - new_size, 2));
+            insert_node(NEXT_BLOCK(ptr), old_size - new_size);
         }
         return ptr;
     }
@@ -175,11 +196,19 @@ void *mm_realloc(void *ptr, size_t size) {
         allowed_size += BLOCK_SIZE(HEADER(NEXT_BLOCK(ptr)));
     }
     if (new_size <= allowed_size) {
-        PUT(HEADER(ptr), PACK(new_size, ALLOC_BITS(HEADER(ptr))));
         new_ptr = ptr;
-        ptr = NEXT_BLOCK(ptr);
-        PUT(HEADER(ptr), PACK(allowed_size - new_size, 2));
-        PUT(FOOTER(ptr), PACK(allowed_size - new_size, 2));
+        remove_node(NEXT_BLOCK(ptr));
+        if (allowed_size - new_size >= 2 * ALIGNMENT) {
+            PUT(HEADER(ptr), PACK(new_size, ALLOC_BITS(HEADER(ptr))));
+            ptr = NEXT_BLOCK(ptr);
+            PUT(HEADER(ptr), PACK(allowed_size - new_size, 2));
+            PUT(FOOTER(ptr), PACK(allowed_size - new_size, 2));
+            insert_node(ptr, allowed_size - new_size);
+        } else {
+            PUT(HEADER(ptr), PACK(allowed_size, ALLOC_BITS(HEADER(ptr))));
+            ptr = NEXT_BLOCK(ptr);
+            SET_PREV_ALLOC(HEADER(ptr));
+        }
     } else {
         new_ptr = mm_malloc(size);
         if (!new_ptr)
@@ -196,7 +225,7 @@ void *mm_realloc(void *ptr, size_t size) {
  * @param bytes the number of bytes to grow; will be 8-byte aligned.
  * @return a pointer to the new free memory block; null pointer on error.
  */
-static inline void *extend_heap(size_t bytes) {
+static void *extend_heap(size_t bytes) {
     size_t size = ALIGN(bytes);
     char *block_ptr = mem_sbrk(size);
 
@@ -216,7 +245,11 @@ static inline void *extend_heap(size_t bytes) {
     return coalesce(block_ptr);
 }
 
-
+/**
+ * Merge adjacent free blocks.
+ * @param bp a pointer to the newly freed block.
+ * @return a pointer to beginning of the merged block.
+ */
 static void *coalesce(void *bp) {
     int prev_alloc = PREV_ALLOC(HEADER(bp));
     int next_alloc = CURR_ALLOC(HEADER(NEXT_BLOCK(bp)));
@@ -226,10 +259,12 @@ static void *coalesce(void *bp) {
     if (prev_alloc && next_alloc) {
         SET_PREV_FREE(HEADER(NEXT_BLOCK(bp)));
     } else if (prev_alloc && !next_alloc) {
+        remove_node(NEXT_BLOCK(bp));
         curr_size += BLOCK_SIZE(HEADER(NEXT_BLOCK(bp)));
         PUT(HEADER(bp), PACK(curr_size, 2));
         PUT(FOOTER(bp), PACK(curr_size, 2));
     } else if (!prev_alloc && next_alloc) {
+        remove_node(PREV_BLOCK(bp));
         curr_size += BLOCK_SIZE(HEADER(PREV_BLOCK(bp)));
         prev_prev = PREV_ALLOC(HEADER(PREV_BLOCK(bp)));
         SET_PREV_FREE(HEADER(NEXT_BLOCK(bp)));
@@ -237,32 +272,43 @@ static void *coalesce(void *bp) {
         PUT(HEADER(PREV_BLOCK(bp)), PACK(curr_size, prev_prev));
         bp = PREV_BLOCK(bp);
     } else {
-        curr_size += BLOCK_SIZE(HEADER(PREV_BLOCK(bp))) + BLOCK_SIZE(HEADER(NEXT_BLOCK(bp)));
+        remove_node(PREV_BLOCK(bp));
+        remove_node(NEXT_BLOCK(bp));
+        curr_size = curr_size + BLOCK_SIZE(HEADER(PREV_BLOCK(bp)))
+                              + BLOCK_SIZE(HEADER(NEXT_BLOCK(bp)));
         prev_prev = PREV_ALLOC(HEADER(PREV_BLOCK(bp)));
         PUT(HEADER(PREV_BLOCK(bp)), PACK(curr_size, prev_prev));
         PUT(FOOTER(NEXT_BLOCK(bp)), PACK(curr_size, prev_prev));
         bp = PREV_BLOCK(bp);
     }
+    insert_node(bp, curr_size);
     return bp;
 }
 
+static int find_group(size_t size) {
+    int offset = 30 - __builtin_clz(size);
+    return (offset >= BUCKET_NUM) ? (BUCKET_NUM - 1) : offset;
+}
 
 static void *find_fit(size_t align_size) {
     void *bp;
-    for (bp = heap_list; BLOCK_SIZE(HEADER(bp)) > 0; bp = NEXT_BLOCK(bp)) {
-        if ((CURR_ALLOC(HEADER(bp)) == 0) && (align_size <= BLOCK_SIZE(HEADER(bp)))) {
-            return bp;
+    int n = find_group(align_size);
+    for (; n < BUCKET_NUM; n++) {
+        for (bp = free_lists[n]; bp != 0; bp = NEXT_NODE(bp)) {
+            if (align_size <= BLOCK_SIZE(HEADER(bp))) {
+                return bp;
+            }
         }
     }
     return NULL;
 }
 
-
 static void place(void *ptr, size_t align_size) {
     size_t free_size = BLOCK_SIZE(HEADER(ptr));
     size_t remainder = free_size - align_size;
+    remove_node(ptr);
 
-    if (remainder < 2 * DOUBLE_SIZE) {
+    if (remainder < 2 * ALIGNMENT) {
         SET_CURR_ALLOC(HEADER(ptr));
         SET_PREV_ALLOC(HEADER(NEXT_BLOCK(ptr)));
         if (CURR_ALLOC(HEADER(NEXT_BLOCK(ptr))) == 0) {
@@ -273,15 +319,102 @@ static void place(void *ptr, size_t align_size) {
         ptr = NEXT_BLOCK(ptr);
         PUT(HEADER(ptr), PACK(remainder, 2));
         PUT(FOOTER(ptr), PACK(remainder, 2));
+        insert_node(ptr, remainder);
+    }
+}
+
+static inline void insert_node(void *bp, size_t size) {
+    int n = find_group(size);
+    void *next = free_lists[n];
+    free_lists[n] = bp;
+    SET_PREV_NODE(bp, 0);
+    SET_NEXT_NODE(bp, next);
+    if (next) {
+        SET_PREV_NODE(next, bp);
+    }
+}
+
+static inline void remove_node(void *bp) {
+    void *prev = PREV_NODE(bp);
+    void *next = NEXT_NODE(bp);
+    size_t size = BLOCK_SIZE(HEADER(bp));
+    int num = find_group(size);
+    if (prev == 0) {
+        free_lists[num] = next;
+    } else {
+        SET_NEXT_NODE(prev, next);
+    }
+    if (next != 0) {
+        SET_PREV_NODE(next, prev);
     }
 }
 
 
+static void check_heap() {
+    void *bp = mem_heap_lo() + BUCKET_NUM * DOUBLE_SIZE;
+
+    // prologue
+    if (GET(bp) != 0) {
+        printf("prologue error\n");
+    }
+    if (GET(bp + WORD_SIZE) != PACK(DOUBLE_SIZE, 1)) {
+        printf("prologue error: header incorrect at %p\n", bp);
+    }
+    if (GET(bp + DOUBLE_SIZE) != PACK(DOUBLE_SIZE, 1)) {
+        printf("prologue error: footer incorrect at %p\n", bp);
+    }
+    bp += DOUBLE_SIZE;
+
+    // heap
+    int prev_alloc = 1;
+    int prev_free = 0;
+    while (bp < mem_heap_hi()) {
+        if (BLOCK_SIZE(HEADER(bp)) == 0) {
+            printf("invalid block size at %p\n", bp);
+        }
+        if (prev_alloc != 1) {
+            if (PREV_ALLOC(HEADER(bp)) != prev_alloc) {
+                printf("block header error: prev alloc bit incorrect at %p\n", bp);
+            }
+        }
+        prev_alloc = PREV_ALLOC(HEADER(bp));
+
+        if (CURR_ALLOC(HEADER(bp)) == 0) {
+            if (GET(HEADER(bp)) != GET(FOOTER(bp))) {
+                printf("header and footer do not match for free block at %p\n", bp);
+            }
+            if (prev_free) {
+                printf("consecutive free blocks at %p\n", bp);
+            }
+            prev_free = 1;
+        } else {
+            prev_free = 0;
+        }
+        bp = NEXT_BLOCK(bp);
+    }
+
+    // epilogue
+    if (BLOCK_SIZE(HEADER(bp)) != 0) {
+        printf("epilogue size error at %p\n", bp);
+    }
+    if (CURR_ALLOC(HEADER(bp)) != 1) {
+        printf("epilogue alloc bit error at %p\n", bp);
+    }
+    if (PREV_ALLOC(HEADER(bp)) != prev_alloc) {
+        printf("epilogue prev alloc bit error at %p\n", bp);
+    }
+    if (bp > mem_heap_hi()) {
+        printf("block exceeds heap break at %p\n", bp);
+    }
+}
+
 static void check_freelist() {
     void *bp;
-    for (bp = heap_list; BLOCK_SIZE(HEADER(bp)) > 0; bp = NEXT_BLOCK(bp)) {
-        printf("address %p, size %d, %s\n", bp, BLOCK_SIZE(HEADER(bp)),
-               CURR_ALLOC(HEADER(bp)) ? "allocated" : "free");
+    for (int i = 0; i < BUCKET_NUM; i++) {
+        printf("Group %d: ", i);
+        for (bp = free_lists[i]; bp; bp = NEXT_NODE(bp)) {
+            printf("%d, ", BLOCK_SIZE(HEADER(bp)));
+        }
+        printf("\n");
     }
-    printf("\n");
 }
