@@ -3,10 +3,7 @@
 /* Recommended max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
-
-/* You won't lose style points for including this long line in your code */
-static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
-
+#define MAX_CACHE_NUM 10
 #define MAXWORD 128
 
 typedef struct {
@@ -15,6 +12,91 @@ typedef struct {
     char path[MAXWORD];
 } url_t;
 
+typedef struct {
+    char url[MAXWORD];
+    char content[MAX_OBJECT_SIZE];
+    int size;
+    int timestamp;
+} cache_t;
+
+typedef struct {
+    int number;
+    cache_t files[MAX_CACHE_NUM];
+} database_t;
+
+/* You won't lose style points for including this long line in your code */
+static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
+
+static database_t cache;
+static sem_t mutex, w;
+static int readcnt, timestamp;
+
+
+void cache_init() {
+    timestamp = 0;
+    readcnt = 0;
+    cache.number = 0;
+    sem_init(&mutex, 0, 1);
+    sem_init(&w, 0, 1);
+}
+
+void cache_add(char *url, char *content, int size) {
+    P(&w);
+    if (cache.number == MAX_CACHE_NUM) {
+        int lru_idx;
+        int lru_time = timestamp;
+        for (int i = 0; i < cache.number; i++) {
+            if (cache.files[i].timestamp < lru_time) {
+                lru_idx = i;
+                lru_time = cache.files[i].timestamp;
+            }
+        }
+        strcpy(cache.files[lru_idx].url, url);
+        memcpy(cache.files[lru_idx].content, content, size);
+        cache.files[lru_idx].size = size;
+        P(&mutex);
+        cache.files[lru_idx].timestamp = ++timestamp;
+        V(&mutex);
+    } else {
+        int index = cache.number;
+        strcpy(cache.files[index].url, url);
+        memcpy(cache.files[index].content, content, size);
+        cache.files[index].size = size;
+        P(&mutex);
+        cache.files[index].timestamp = ++timestamp;
+        V(&mutex);
+        cache.number += 1;
+    }
+    V(&w);
+}
+
+int cache_retrieve(rio_t *rio_ptr, char *url) {
+    P(&mutex);
+    readcnt += 1;
+    if (readcnt == 1) {
+        P(&w);
+    }
+    V(&mutex);
+
+    int hit = 0;
+    for (int i = 0; i < cache.number; i++) {
+        if (strcmp(cache.files[i].url, url) == 0) {
+            P(&mutex);
+            cache.files[i].timestamp = ++timestamp;
+            V(&mutex);
+            rio_writen(rio_ptr->rio_fd, cache.files[i].content, cache.files[i].size);
+            hit = 1;
+            break;
+        }
+    }
+    P(&mutex);
+    readcnt -= 1;
+    if (readcnt == 0) {
+        V(&w);
+    }
+    V(&mutex);
+    return hit;
+}
 
 int parse_url(char *url_str, url_t *url_info) {
     // HTTP protocol
@@ -39,6 +121,7 @@ int parse_url(char *url_str, url_t *url_info) {
     } else {
         *port_ptr = '\0';
         strcpy(url_info->host, host_ptr);
+        *port_ptr = ':';
         *uri_ptr = '\0';
         strcpy(url_info->port, port_ptr + 1);
         *uri_ptr = '/';
@@ -83,6 +166,10 @@ void parse_header(rio_t *rio_ptr, char *header, url_t *url_info) {
 }
 
 void handle_request(rio_t *rio_ptr, char *url_str) {
+    if (cache_retrieve(rio_ptr, url_str)) {
+        return;
+    }
+
     url_t url_info;
     if (parse_url(url_str, &url_info) == -1) {
         fprintf(stderr, "parse URL error\n");
@@ -107,6 +194,7 @@ void handle_request(rio_t *rio_ptr, char *url_str) {
     }
 
     int total = 0, curr = 0;
+    char response[MAX_OBJECT_SIZE];
     char buf[MAXLINE];
     while ((curr = rio_readnb(&server_rio, buf, MAXLINE)) != 0) {
         if (rio_writen(rio_ptr->rio_fd, buf, curr) != curr) {
@@ -114,7 +202,13 @@ void handle_request(rio_t *rio_ptr, char *url_str) {
             close(serverfd);
             return;
         }
+        if (total + curr < MAX_OBJECT_SIZE) {
+            memcpy(response + total, buf, curr);
+        }
         total += curr;
+    }
+    if (total < MAX_OBJECT_SIZE) {
+        cache_add(url_str, response, total);
     }
     close(serverfd);
 }
@@ -160,6 +254,7 @@ int main(int argc, char* argv[]) {
         exit(1);
     }
     signal(SIGPIPE, SIG_IGN);
+    cache_init();
 
     listenfd = Open_listenfd(argv[1]);
     while (1) {
