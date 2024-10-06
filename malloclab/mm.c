@@ -188,32 +188,88 @@ void *mm_realloc(void *ptr, size_t size) {
         return ptr;
     }
 
-    void *new_ptr;
-    size_t allowed_size = old_size;
-    if (CURR_ALLOC(HEADER(NEXT_BLOCK(ptr))) == 0) {
-        allowed_size += BLOCK_SIZE(HEADER(NEXT_BLOCK(ptr)));
-    }
-    if (new_size <= allowed_size) {
-        new_ptr = ptr;
-        remove_node(NEXT_BLOCK(ptr));
-        if (allowed_size - new_size >= 2 * ALIGNMENT) {
-            PUT(HEADER(ptr), PACK(new_size, ALLOC_BITS(HEADER(ptr))));
-            ptr = NEXT_BLOCK(ptr);
-            PUT(HEADER(ptr), PACK(allowed_size - new_size, 2));
-            PUT(FOOTER(ptr), PACK(allowed_size - new_size, 2));
-            insert_node(ptr, allowed_size - new_size);
-        } else {
-            PUT(HEADER(ptr), PACK(allowed_size, ALLOC_BITS(HEADER(ptr))));
-            ptr = NEXT_BLOCK(ptr);
-            SET_PREV_ALLOC(HEADER(ptr));
+    size_t extend_size = old_size;
+    int prev_alloc = PREV_ALLOC(HEADER(ptr));
+    int next_alloc = CURR_ALLOC(HEADER(NEXT_BLOCK(ptr)));
+    void *prev_ptr = PREV_BLOCK(ptr);
+    void *next_ptr = NEXT_BLOCK(ptr);
+    if (!next_alloc)
+        extend_size += BLOCK_SIZE(HEADER(next_ptr));
+    if (!prev_alloc)
+        extend_size += BLOCK_SIZE(HEADER(prev_ptr));
+
+    if (new_size <= extend_size) {
+        // coalesce with previous and next blocks
+        if (!prev_alloc && !next_alloc) {
+            remove_node(prev_ptr);
+            remove_node(next_ptr);
+            memmove(prev_ptr, ptr, old_size - WORD_SIZE);
+            ptr = prev_ptr;
+            if (extend_size - new_size >= 2 * ALIGNMENT) {
+                PUT(HEADER(ptr), PACK(new_size, PREV_ALLOC(HEADER(ptr)) + 1));
+                next_ptr = NEXT_BLOCK(ptr);
+                PUT(HEADER(next_ptr), PACK(extend_size - new_size, 2));
+                PUT(FOOTER(next_ptr), PACK(extend_size - new_size, 2));
+                insert_node(next_ptr, extend_size - new_size);
+            } else {
+                PUT(HEADER(ptr), PACK(extend_size, PREV_ALLOC(HEADER(ptr)) + 1));
+                SET_PREV_ALLOC(HEADER(NEXT_BLOCK(ptr)));
+            }
         }
-    } else {
-        new_ptr = mm_malloc(size);
-        if (!new_ptr)
-            return NULL;
-        memcpy(new_ptr, ptr, old_size);
-        mm_free(ptr);
+
+        // coalesce with the previous block only
+        else if (!prev_alloc) {
+            remove_node(prev_ptr);
+            memmove(prev_ptr, ptr, old_size - WORD_SIZE);
+            ptr = prev_ptr;
+            if (extend_size - new_size >= 2 * ALIGNMENT) {
+                PUT(HEADER(ptr), PACK(new_size, PREV_ALLOC(HEADER(ptr)) + 1));
+                next_ptr = NEXT_BLOCK(ptr);
+                PUT(HEADER(next_ptr), PACK(extend_size - new_size, 2));
+                PUT(FOOTER(next_ptr), PACK(extend_size - new_size, 2));
+                insert_node(next_ptr, extend_size - new_size);
+            } else {
+                PUT(HEADER(ptr), PACK(extend_size, PREV_ALLOC(HEADER(ptr)) + 1));
+                SET_PREV_ALLOC(HEADER(NEXT_BLOCK(ptr)));
+            }
+        }
+
+        // coalesce with the next block only
+        else if (!next_alloc) {
+            remove_node(next_ptr);
+            if (extend_size - new_size >= 2 * ALIGNMENT) {
+                PUT(HEADER(ptr), PACK(new_size, ALLOC_BITS(HEADER(ptr))));
+                next_ptr = NEXT_BLOCK(ptr);
+                PUT(HEADER(next_ptr), PACK(extend_size - new_size, 2));
+                PUT(FOOTER(next_ptr), PACK(extend_size - new_size, 2));
+                insert_node(next_ptr, extend_size - new_size);
+            } else {
+                PUT(HEADER(ptr), PACK(extend_size, ALLOC_BITS(HEADER(ptr))));
+                SET_PREV_ALLOC(HEADER(NEXT_BLOCK(ptr)));
+            }
+        }
+        return ptr;
     }
+
+    // try to extend the heap if at the end
+    if (BLOCK_SIZE(HEADER(NEXT_BLOCK(ptr))) == 0) {
+        size_t extend_bytes = ALIGN(new_size - old_size);
+        if ((long) (mem_sbrk(extend_bytes)) == -1)
+            return NULL;
+        size_t total_size = old_size + extend_bytes;
+        PUT(HEADER(ptr), PACK(total_size, ALLOC_BITS(HEADER(ptr))));
+        PUT(FOOTER(ptr), PACK(total_size, ALLOC_BITS(HEADER(ptr))));
+        // Set new epilogue header
+        PUT(HEADER(NEXT_BLOCK(ptr)), PACK(0, 1));
+        return ptr;
+    }
+
+    // Cannot expand in place, allocate new block
+    void *new_ptr = mm_malloc(size);
+    if (new_ptr == NULL)
+        return NULL;
+    memcpy(new_ptr, ptr, MIN(size, old_size - WORD_SIZE));
+    mm_free(ptr);
     return new_ptr;
 }
 
