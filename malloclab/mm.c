@@ -205,48 +205,24 @@ void *mm_realloc(void *ptr, size_t size) {
             remove_node(next_ptr);
             memmove(prev_ptr, ptr, old_size - WORD_SIZE);
             ptr = prev_ptr;
-            if (extend_size - new_size >= 2 * ALIGNMENT) {
-                PUT(HEADER(ptr), PACK(new_size, PREV_ALLOC(HEADER(ptr)) + 1));
-                next_ptr = NEXT_BLOCK(ptr);
-                PUT(HEADER(next_ptr), PACK(extend_size - new_size, 2));
-                PUT(FOOTER(next_ptr), PACK(extend_size - new_size, 2));
-                insert_node(next_ptr, extend_size - new_size);
-            } else {
-                PUT(HEADER(ptr), PACK(extend_size, PREV_ALLOC(HEADER(ptr)) + 1));
-                SET_PREV_ALLOC(HEADER(NEXT_BLOCK(ptr)));
-            }
-        }
-
-        // coalesce with the previous block only
-        else if (!prev_alloc) {
+        } else if (!prev_alloc) {
+            // coalesce with the previous block only
             remove_node(prev_ptr);
             memmove(prev_ptr, ptr, old_size - WORD_SIZE);
             ptr = prev_ptr;
-            if (extend_size - new_size >= 2 * ALIGNMENT) {
-                PUT(HEADER(ptr), PACK(new_size, PREV_ALLOC(HEADER(ptr)) + 1));
-                next_ptr = NEXT_BLOCK(ptr);
-                PUT(HEADER(next_ptr), PACK(extend_size - new_size, 2));
-                PUT(FOOTER(next_ptr), PACK(extend_size - new_size, 2));
-                insert_node(next_ptr, extend_size - new_size);
-            } else {
-                PUT(HEADER(ptr), PACK(extend_size, PREV_ALLOC(HEADER(ptr)) + 1));
-                SET_PREV_ALLOC(HEADER(NEXT_BLOCK(ptr)));
-            }
-        }
-
-        // coalesce with the next block only
-        else if (!next_alloc) {
+        } else if (!next_alloc) {
+            // coalesce with the next block only
             remove_node(next_ptr);
-            if (extend_size - new_size >= 2 * ALIGNMENT) {
-                PUT(HEADER(ptr), PACK(new_size, ALLOC_BITS(HEADER(ptr))));
-                next_ptr = NEXT_BLOCK(ptr);
-                PUT(HEADER(next_ptr), PACK(extend_size - new_size, 2));
-                PUT(FOOTER(next_ptr), PACK(extend_size - new_size, 2));
-                insert_node(next_ptr, extend_size - new_size);
-            } else {
-                PUT(HEADER(ptr), PACK(extend_size, ALLOC_BITS(HEADER(ptr))));
-                SET_PREV_ALLOC(HEADER(NEXT_BLOCK(ptr)));
-            }
+        }
+        if (extend_size - new_size >= 2 * ALIGNMENT) {
+            PUT(HEADER(ptr), PACK(new_size, PREV_ALLOC(HEADER(ptr)) + 1));
+            next_ptr = NEXT_BLOCK(ptr);
+            PUT(HEADER(next_ptr), PACK(extend_size - new_size, 2));
+            PUT(FOOTER(next_ptr), PACK(extend_size - new_size, 2));
+            insert_node(next_ptr, extend_size - new_size);
+        } else {
+            PUT(HEADER(ptr), PACK(extend_size, PREV_ALLOC(HEADER(ptr)) + 1));
+            SET_PREV_ALLOC(HEADER(NEXT_BLOCK(ptr)));
         }
         return ptr;
     }
